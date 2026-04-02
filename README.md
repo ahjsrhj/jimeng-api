@@ -17,6 +17,7 @@
 - 🎨 **AI Image Generation**: Supports multiple models and resolutions (default 2K, supports 4K, 1K).
 - 🖼️ **Image-to-Image Synthesis**: Supports local images or image URLs.
 - 🎬 **AI Video Generation**: Supports text-to-video generation, and adds local image upload for image-to-video on the China site.
+- 🧠 **Seedance Browser Proxy Signing**: Seedance 2.0 / 2.0 Fast submit requests automatically use a browser-backed proxy to inject `a_bogus` and avoid `ret=1019` / `shark not pass`.
 - 🌐 **International Site Support**: Added support for text-to-image and image-to-image APIs on Dreamina international sites. Open an issue if you run into problems.
 - 🔄 **Smart Polling**: Adaptive polling mechanism to optimize generation efficiency.
 - 🛡️ **Unified Exception Handling**: Comprehensive error handling and retry mechanism.
@@ -78,6 +79,7 @@ curl -X POST http://localhost:5100/v1/images/generations \
 
 - Node.js 18+
 - npm or yarn
+- Chromium (run `npm run install:chromium` before using Seedance 2.0 / 2.0 Fast locally)
 - Docker (optional)
 
 ### Installation and Deployment
@@ -110,6 +112,9 @@ cd jimeng-api
 
 # Install dependencies
 npm install
+
+# Install Chromium (required for Seedance 2.0 / 2.0 Fast)
+npm run install:chromium
 
 # Build files
 npm run build
@@ -156,6 +161,7 @@ docker exec -it jimeng-api sh
 - ✅ **Health check**: Automatic service status monitoring
 - ✅ **Unified port**: Uses port 5100 both inside and outside the container
 - ✅ **Log management**: Structured log output
+- ✅ **Built-in Chromium**: The image ships with Playwright-managed Chromium and required system libraries
 
 ### Configuration
 
@@ -457,6 +463,13 @@ Generate a video from a text prompt (Text-to-Video) or from start/end frame imag
 > - In the `prompt`, use `@field_name` (e.g., `@image_file_1`, `@video_file_1`) or `@original_filename` to reference materials and describe their roles.
 > - **Note**: When using curl `-F`, the `@` symbol in `prompt` values is interpreted as a file reference. Use `--form-string` for the prompt field instead.
 > - Example prompt: `"@image_file_1 as first frame, @image_file_2 as last frame, mimic motion from @video_file_1"`
+
+> **Seedance signing notes**:
+> - `jimeng-video-seedance-2.0` and `jimeng-video-seedance-2.0-fast` submit `/mweb/v1/aigc_draft/generate` through the built-in BrowserService.
+> - BrowserService lazily starts headless Chromium and lets the live page environment inject `a_bogus` via the bdms SDK.
+> - Only the final submit request uses the browser proxy; image generation, regular video generation, uploads, polling, and credit APIs still use direct Node.js requests.
+> - Each token reuses an isolated browser session, which is cleaned up after 10 minutes of inactivity.
+> - The first Seedance request includes a one-time browser startup cost.
 
 **Supported Video Models**:
 - `jimeng-video-seedance-2.0` - Seedance 2.0, China site only, supports 4~15s duration, supports Omni Reference mode **(Latest)**

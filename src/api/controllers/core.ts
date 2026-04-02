@@ -60,6 +60,7 @@ const FAKE_HEADERS = {
 };
 // 文件最大大小
 const FILE_MAX_SIZE = 100 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT = 45000;
 
 /**
  * 获取缓存中的access_token
@@ -90,6 +91,29 @@ export interface RegionInfo {
 export interface TokenWithProxy {
   token: string;
   proxyUrl: string | null;
+}
+
+export interface JimengRequestOptions extends AxiosRequestConfig {
+  noDefaultParams?: boolean;
+}
+
+export interface JimengRequestInit {
+  method: string;
+  uri: string;
+  url: string;
+  finalUrl: string;
+  baseUrl: string;
+  origin: string;
+  aid: number;
+  region: string;
+  params: Record<string, any>;
+  headers: Record<string, any>;
+  proxyUrl: string | null;
+  regionInfo: RegionInfo;
+  tokenWithRegion: string;
+  deviceTime: number;
+  timeout: number;
+  data?: any;
 }
 
 export function parseProxyFromToken(rawToken: string): TokenWithProxy {
@@ -177,6 +201,151 @@ export function generateCookie(refreshToken: string) {
   ].join("; ");
 }
 
+function appendUrlParams(url: string, params: Record<string, any> = {}) {
+  const target = new URL(url);
+
+  Object.entries(params).forEach(([key, value]) => {
+    if (_.isNil(value)) return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => {
+        if (_.isNil(item)) return;
+        target.searchParams.append(key, String(item));
+      });
+      return;
+    }
+    target.searchParams.set(key, String(value));
+  });
+
+  return target.toString();
+}
+
+function maskProxyUrl(proxyUrl: string) {
+  return proxyUrl.replace(/\/\/([^@/]+)@/i, "//***@");
+}
+
+function resolveRequestContext(refreshToken: string, uri: string) {
+  const { token: tokenWithRegion, proxyUrl } = parseProxyFromToken(refreshToken);
+  const regionInfo = parseRegionFromToken(tokenWithRegion);
+  const { isUS, isHK, isJP, isSG } = regionInfo;
+
+  let baseUrl: string;
+  let aid: number;
+  let region: string;
+
+  if (isUS) {
+    baseUrl = uri.startsWith("/commerce/") ? BASE_URL_US_COMMERCE : BASE_URL_DREAMINA_US;
+    aid = DEFAULT_ASSISTANT_ID_US;
+    region = REGION_US;
+  } else if (isHK || isJP || isSG) {
+    baseUrl = uri.startsWith("/commerce/") ? BASE_URL_HK_COMMERCE : BASE_URL_DREAMINA_HK;
+    if (isJP) {
+      aid = DEFAULT_ASSISTANT_ID_JP;
+      region = REGION_JP;
+    } else if (isSG) {
+      aid = DEFAULT_ASSISTANT_ID_SG;
+      region = REGION_SG;
+    } else {
+      aid = DEFAULT_ASSISTANT_ID_HK;
+      region = REGION_HK;
+    }
+  } else {
+    baseUrl = BASE_URL_CN;
+    aid = DEFAULT_ASSISTANT_ID_CN;
+    region = REGION_CN;
+  }
+
+  return {
+    tokenWithRegion,
+    proxyUrl,
+    regionInfo,
+    aid,
+    region,
+    baseUrl,
+    origin: new URL(baseUrl).origin,
+  };
+}
+
+function normalizeHeaders(headers?: AxiosRequestConfig["headers"]): Record<string, any> {
+  if (!headers) return {};
+  if (_.isPlainObject(headers)) return headers as Record<string, any>;
+  return {};
+}
+
+function createProxyAgent(proxyUrl: string | null) {
+  if (!proxyUrl) return undefined;
+  return proxyUrl.toLowerCase().startsWith("socks")
+    ? new SocksProxyAgent(proxyUrl)
+    : new HttpsProxyAgent(proxyUrl);
+}
+
+export function buildJimengRequestInit(
+  method: string,
+  uri: string,
+  refreshToken: string,
+  options: JimengRequestOptions = {}
+): JimengRequestInit {
+  const {
+    tokenWithRegion,
+    proxyUrl,
+    regionInfo,
+    aid,
+    region,
+    baseUrl,
+    origin,
+  } = resolveRequestContext(refreshToken, uri);
+  const { isUS, isHK, isJP, isSG } = regionInfo;
+  const deviceTime = util.unixTimestamp();
+  const sign = util.md5(
+    `9e2c|${uri.slice(-7)}|${PLATFORM_CODE}|${VERSION_CODE}|${deviceTime}||11ac`
+  );
+  const params = options.noDefaultParams ? (options.params || {}) : {
+    aid,
+    device_platform: "web",
+    region,
+    ...(isUS || isHK || isJP || isSG ? {} : { webId: WEB_ID }),
+    da_version: DA_VERSION,
+    os: "windows",
+    web_component_open_flag: 1,
+    web_version: WEB_VERSION,
+    aigc_features: "app_lip_sync",
+    ...(options.params || {}),
+  };
+  const headers = {
+    ...FAKE_HEADERS,
+    Origin: origin,
+    Referer: origin,
+    "App-Sdk-Version": "48.0.0",
+    Appid: aid,
+    Cookie: generateCookie(tokenWithRegion),
+    "Device-Time": deviceTime,
+    Lan: isUS ? "en" : isJP ? "ja" : (isHK || isSG) ? "en" : "zh-Hans",
+    Loc: isUS ? "us" : isJP ? "jp" : isHK ? "hk" : isSG ? "sg" : "cn",
+    Sign: sign,
+    "Sign-Ver": "1",
+    Tdid: "",
+    ...normalizeHeaders(options.headers),
+  };
+
+  return {
+    method,
+    uri,
+    url: `${baseUrl}${uri}`,
+    finalUrl: appendUrlParams(`${baseUrl}${uri}`, params),
+    baseUrl,
+    origin,
+    aid,
+    region,
+    params,
+    headers,
+    proxyUrl,
+    regionInfo,
+    tokenWithRegion,
+    deviceTime,
+    timeout: options.timeout || DEFAULT_REQUEST_TIMEOUT,
+    data: options.data,
+  };
+}
+
 /**
  * 获取积分信息
  *
@@ -236,98 +405,27 @@ export async function request(
   method: string,
   uri: string,
   refreshToken: string,
-  options: AxiosRequestConfig & { noDefaultParams?: boolean } = {}
+  options: JimengRequestOptions = {}
 ) {
-  const { token: tokenWithRegion, proxyUrl } = parseProxyFromToken(refreshToken);
-  const regionInfo = parseRegionFromToken(tokenWithRegion);
-  const { isUS, isHK, isJP, isSG } = regionInfo;
+  const requestInit = buildJimengRequestInit(method, uri, refreshToken, options);
+  const {
+    url,
+    params,
+    headers,
+    proxyUrl,
+    regionInfo,
+    tokenWithRegion,
+  } = requestInit;
   await acquireToken(regionInfo.isInternational ? tokenWithRegion.substring(3) : tokenWithRegion);
-  const deviceTime = util.unixTimestamp();
-  const sign = util.md5(
-    `9e2c|${uri.slice(-7)}|${PLATFORM_CODE}|${VERSION_CODE}|${deviceTime}||11ac`
-  );
 
-  let baseUrl: string;
-  let aid: number;
-  let region: string;
-
-  if (isUS) {
-    if (uri.startsWith("/commerce/")) {
-      baseUrl = BASE_URL_US_COMMERCE;
-    } else {
-      baseUrl = BASE_URL_DREAMINA_US;
-    }
-    aid = DEFAULT_ASSISTANT_ID_US;
-    region = REGION_US;
-  } else if (isHK || isJP || isSG) {
-    // HK, JP and SG regions use the same SG base URL
-    if (uri.startsWith("/commerce/")) {
-      baseUrl = BASE_URL_HK_COMMERCE;
-    } else {
-      baseUrl = BASE_URL_DREAMINA_HK;
-    }
-    if (isJP) {
-      aid = DEFAULT_ASSISTANT_ID_JP;
-      region = REGION_JP;
-    } else if (isSG) {
-      aid = DEFAULT_ASSISTANT_ID_SG;
-      region = REGION_SG;
-    } else {
-      aid = DEFAULT_ASSISTANT_ID_HK;
-      region = REGION_HK;
-    }
-  } else {
-    // CN region
-    baseUrl = BASE_URL_CN;
-    aid = DEFAULT_ASSISTANT_ID_CN;
-    region = REGION_CN;
-  }
-
-  const origin = new URL(baseUrl).origin;
-
-  const fullUrl = `${baseUrl}${uri}`;
-  const requestParams = options.noDefaultParams ? (options.params || {}) : {
-    aid: aid,
-    device_platform: "web",
-    region: region,
-    ...(isUS || isHK || isJP || isSG ? {} : { webId: WEB_ID }),
-    da_version: DA_VERSION,
-    os: "windows",
-    web_component_open_flag: 1,
-    web_version: WEB_VERSION,
-    aigc_features: "app_lip_sync",
-    ...(options.params || {}),
-  };
-
-  const headers = {
-    ...FAKE_HEADERS,
-    Origin: origin,
-    Referer: origin,
-    "App-Sdk-Version": "48.0.0",
-    Appid: aid,
-    Cookie: generateCookie(tokenWithRegion),
-    "Device-Time": deviceTime,
-    Lan: isUS ? "en" : isJP ? "ja" : (isHK || isSG) ? "en" : "zh-Hans",
-    Loc: isUS ? "us" : isJP ? "jp" : isHK ? "hk" : isSG ? "sg" : "cn",
-    Sign: sign,
-    "Sign-Ver": "1",
-    Tdid: "",
-    ...(options.headers || {}),
-  };
-
-  logger.info(`发送请求: ${method.toUpperCase()} ${fullUrl}`);
+  logger.info(`发送请求: ${method.toUpperCase()} ${url}`);
   if (proxyUrl) {
-    const maskedProxyUrl = proxyUrl.replace(/\/\/([^@/]+)@/i, "//***@");
-    logger.info(`使用代理: ${maskedProxyUrl}`);
+    logger.info(`使用代理: ${maskProxyUrl(proxyUrl)}`);
   }
-  logger.info(`请求参数: ${JSON.stringify(requestParams)}`);
+  logger.info(`请求参数: ${JSON.stringify(params)}`);
   logger.info(`请求数据: ${JSON.stringify(options.data || {})}`);
 
-  const proxyAgent = proxyUrl
-    ? (proxyUrl.toLowerCase().startsWith("socks")
-      ? new SocksProxyAgent(proxyUrl)
-      : new HttpsProxyAgent(proxyUrl))
-    : undefined;
+  const proxyAgent = createProxyAgent(proxyUrl);
 
   // 添加重试逻辑
   let retries = 0;
@@ -337,17 +435,17 @@ export async function request(
   while (retries <= maxRetries) {
     try {
       if (retries > 0) {
-        logger.info(`第 ${retries} 次重试请求: ${method.toUpperCase()} ${fullUrl}`);
+        logger.info(`第 ${retries} 次重试请求: ${method.toUpperCase()} ${url}`);
         // 重试前等待一段时间
         await new Promise(resolve => setTimeout(resolve, RETRY_CONFIG.RETRY_DELAY));
       }
 
       const response = await axios.request({
         method,
-        url: fullUrl,
-        params: requestParams,
-        headers: headers,
-        timeout: 45000, // 增加超时时间到45秒
+        url,
+        params,
+        headers,
+        timeout: requestInit.timeout,
         validateStatus: () => true, // 允许任何状态码
         ..._.omit(options, "params", "headers", "noDefaultParams"),
         ...(proxyAgent ? { httpAgent: proxyAgent, httpsAgent: proxyAgent, proxy: false } : {}),

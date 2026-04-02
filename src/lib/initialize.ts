@@ -1,5 +1,14 @@
 import logger from './logger.js';
 
+async function disposeBrowserService() {
+    try {
+        const { disposeBrowserService } = await import("./browser/BrowserService.ts");
+        await disposeBrowserService();
+    } catch (_) {
+        // BrowserService may be unavailable before playwright dependencies are installed.
+    }
+}
+
 // 允许无限量的监听器
 process.setMaxListeners(Infinity);
 // 输出未捕获异常
@@ -20,9 +29,9 @@ process.on("exit", () => {
 // 进程被kill
 process.on("SIGTERM", () => {
     logger.warn("received kill signal");
-    process.exit(2);
+    void disposeBrowserService().finally(() => process.exit(0));
 });
 // Ctrl-C进程退出
 process.on("SIGINT", () => {
-    process.exit(0);
+    void disposeBrowserService().finally(() => process.exit(0));
 });

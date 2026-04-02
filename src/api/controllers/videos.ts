@@ -14,6 +14,7 @@ import { uploadImageBuffer, ImageUploadResult } from "@/lib/image-uploader.ts";
 import { uploadVideoBuffer, VideoUploadResult } from "@/lib/video-uploader.ts";
 import { extractVideoUrl, fetchHighQualityVideoUrl } from "@/lib/image-utils.ts";
 import { uploadVideoFromUrl } from "@/lib/video-uploader.ts";
+import { browserRequest } from "@/lib/browser/BrowserService.ts";
 
 export const DEFAULT_MODEL = DEFAULT_VIDEO_MODEL;
 
@@ -847,7 +848,10 @@ export async function generateVideo(
   const videoReferer = regionInfo.isCN
     ? "https://jimeng.jianying.com/ai-tool/generate?type=video"
     : "https://dreamina.capcut.com/ai-tool/generate?type=video";
-  const { aigc_data } = await request(
+  const shouldUseBrowserProxy = regionInfo.isCN && (is40Pro || is40);
+  const submitRequest = shouldUseBrowserProxy ? browserRequest : request;
+  logger.info(`视频生成提交方式: ${shouldUseBrowserProxy ? "browser-proxy" : "direct-request"}`);
+  const { aigc_data } = await submitRequest(
     "post",
     "/mweb/v1/aigc_draft/generate",
     refreshToken,
